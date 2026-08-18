@@ -1,0 +1,291 @@
+---
+title: "run_command and search_files tools"
+brief: "Staged implementation plan: two new agent tools built in parallel, then registered in main.go"
+kind: "plan"
+localOnly: true
+---
+
+# run_command and search_files tools
+
+This repo is a minimal code-editing agent: a CLI chat loop (all in `main.go`, package `main`) that gives a Claude model three tools — `read_file`, `list_files`, `edit_file`. The model currently works blind: it cannot run the code it edits or search file contents. This plan adds two tools. `run_command` executes a model-chosen shell command via `sh -c`, but only after the human approves it at an interactive `Allow? [y/N]` prompt that fails closed (non-TTY stdin, EOF, empty, or garbage all decline); output is capped at 10KB, a 30s timeout kills runaways, and the exit code is always reported. `search_files` runs a Go RE2 regex over file contents under an optional path, skipping `.git` and binary files, returning up to 100 `path:line: text` matches.
+
+**Done means:** both tools exist in their own files with table-driven tests (the repo's first tests), `main.go`'s `tools` slice lists five definitions, and the full gate passes — `gofmt -l .` clean, `go build ./...`, `go vet ./...`, `go test ./...` (final gate adds `-race` and the `go run . < /dev/null` smoke run).
+
+Source documents in this repo: the approved design at `docs/design/run-search-tools/design.md` (all INV-n / AC-n IDs below are defined there) and the approved task breakdown at `docs/planning/run-search-tools/plan.md`. Branch: `feat/run-search-tools`. Every product decision (sh -c, y/N gate, caps, timeout, RE2 walk) is settled in the design — this plan has no open questions.
+
+## Stage lanes
+
+Two stages. Stage 1's tasks run in parallel: their file sets are disjoint (each creates only its own tool file and test file) and both consume only symbols that already exist in `main.go` — neither consumes anything the other defines. Stage 2 starts only after both stage-1 tasks are committed.
+
+<Diagram id="stage-lanes" frame="hide" caption="Lanes are stages; stage-1 tasks run side by side, stage 2 follows the commit barrier.">
+
+```html
+<div class="lanes">
+  <div class="diagram-panel lane" data-rough>
+    <div class="lane-head">Stage 1 <span class="diagram-pill">parallel</span></div>
+    <div class="lane-tasks">
+      <div class="diagram-node">run_command<br/><span class="diagram-muted">gate + exec + tests</span></div>
+      <div class="diagram-node">search_files<br/><span class="diagram-muted">regex walk + tests</span></div>
+    </div>
+    <div class="lane-note diagram-muted">disjoint file sets — neither task touches main.go</div>
+  </div>
+  <div class="barrier diagram-muted">&#8595; commit barrier — stage 2 starts only after both stage-1 commits</div>
+  <div class="diagram-panel lane" data-rough>
+    <div class="lane-head">Stage 2 <span class="diagram-pill">sequential</span></div>
+    <div class="lane-tasks">
+      <div class="diagram-node">register both tools<br/><span class="diagram-muted">main.go tools slice — the only main.go edit</span></div>
+    </div>
+  </div>
+</div>
+```
+
+```css
+.lanes { display: flex; flex-direction: column; gap: 10px; max-width: 640px; margin-inline: auto; }
+.lane { padding: 14px 16px; }
+.lane-head { font-weight: 600; margin-bottom: 10px; display: flex; gap: 8px; align-items: center; }
+.lane-tasks { display: flex; gap: 12px; }
+.lane-tasks .diagram-node { flex: 1; text-align: center; padding: 12px; }
+.lane-note { margin-top: 10px; text-align: center; }
+.barrier { text-align: center; }
+```
+
+</Diagram>
+
+<Callout id="registration-split-decision" tone="decision">
+
+The `main.go` registration edit is pulled out into its own stage-2 task. Folding registration into each tool task would give both stage-1 tasks a shared file and serialize the whole feature over a one-line edit; splitting it keeps stage 1 parallel-safe, and the stage-2 task still owns a checked outcome (AC-14 plus the smoke run).
+
+</Callout>
+
+## Stage 1 — the two tools, side by side
+
+<Columns id="stage1-tasks">
+<Column id="stage1-run-command" label="Task: run_command (gate + exec)">
+
+<RichText id="stage1-run-command-body">
+
+**Files:** `run_command.go`, `run_command_test.go` (both new)
+
+Delivers the `run_command` tool complete and tested at package level: the model supplies a command, the human sees it verbatim and answers `y`/`yes` to run it via `sh -c` with a 30s timeout (`WaitDelay` 2s) and a 10240-byte combined-output cap.
+
+Decided constraints (design Sections 3, 5–7):
+
+- The gate reads stdin **one byte at a time** through the first newline — never a `bufio` reader, because the chat loop already owns a `bufio.Scanner` on `os.Stdin` and a second buffered reader would swallow the user's next chat message.
+- Non-TTY stdin (char-device check) declines *before* prompting; EOF, empty, and garbage answers decline. Fail closed, per-invocation approval, no "always allow".
+- Decline and "sh could not start" return Go errors (becoming error tool results); a non-zero exit is a **normal** result with `exit code: <n>` and output.
+- Exact error strings, result format, and the test seams (`confirmIn`, `confirmOut`, `commandTimeout`, `stdinIsTerminal`) are fixed by the design.
+
+**Proof:** INV-1…INV-5, INV-9, half of INV-8; AC-1…AC-8, AC-15 — table-driven tests swap the seams and use a `t.TempDir()` sentinel file to prove declined commands never start.
+
+</RichText>
+
+</Column>
+
+<Column id="stage1-search-files" label="Task: search_files (regex walk)">
+
+<RichText id="stage1-search-files-body">
+
+**Files:** `search_files.go`, `search_files_test.go` (both new)
+
+Delivers the `search_files` tool complete and tested at package level: a Go RE2 pattern matched against every line of every text file under an optional relative path (default `.`), returning `path:line: text` matches.
+
+Decided constraints (design Sections 3, 5–7):
+
+- Pure Go stdlib — no shelling out to grep, no path sandboxing (deliberately consistent with `read_file`/`list_files`).
+- Whole-file read with `os.ReadFile`, split on newline (sidesteps the 64KB `bufio.Scanner` line limit); a NUL byte in the first 8KB marks a file binary and it is skipped; `.git` is never entered.
+- Caps: 100 matches (walk stops via `fs.SkipAll`, truncation note appended), 250 bytes per emitted line.
+- Errors only for an invalid regex or an unreadable root; unreadable entries mid-walk are skipped silently and the search continues.
+
+**Proof:** INV-6, INV-7, half of INV-8; AC-9…AC-13 — `t.TempDir()` fixtures: plain match, nested dir, `.git/config` match, NUL-file match, 150-match file.
+
+</RichText>
+
+</Column>
+</Columns>
+
+## Stage 2 — register both tools
+
+After stage 1 both tools exist and pass their tests, but the agent never offers them to the model. Stage 2 makes the single permitted `main.go` change — the `tools` slice in `main()` grows from three definitions to five. No other edit: no refactors, no touching the chat loop or existing tools.
+
+<Diff
+  id="main-go-registration"
+  filename="main.go"
+  language="go"
+  mode="unified"
+  before={"tools := []ToolDefinition{ReadFileDefinition, ListFilesDefinition, EditFileDefinition}"}
+  after={"tools := []ToolDefinition{\n\tReadFileDefinition,\n\tListFilesDefinition,\n\tEditFileDefinition,\n\tRunCommandDefinition,\n\tSearchFilesDefinition,\n}"}
+  annotations={[
+    {
+      side: "after",
+      lines: "5-6",
+      label: "The whole diff",
+      note: "The feature's only main.go change (AC-14). Both definitions are package-level vars created in stage 1.",
+    },
+  ]}
+/>
+
+The stage-2 check `go run . < /dev/null` doubles as the live fail-closed proof: `/dev/null` is a character device, so any confirmation read would hit EOF and decline — and with stdin at EOF the chat loop exits before any API call, so no `ANTHROPIC_API_KEY` is needed.
+
+## File map
+
+<FileTree
+  id="feature-file-map"
+  title="Files touched"
+  entries={[
+    {
+      path: "run_command.go",
+      change: "added",
+      note: "Stage 1 — tool definition, TTY check, y/N gate, sh -c exec, timeout, output cap, test seams.",
+    },
+    {
+      path: "run_command_test.go",
+      change: "added",
+      note: "Stage 1 — first tests in the repo; gate table + cap/exit/timeout/stream cases.",
+    },
+    {
+      path: "search_files.go",
+      change: "added",
+      note: "Stage 1 — tool definition, RE2 compile, WalkDir, .git/binary skip, match caps.",
+    },
+    {
+      path: "search_files_test.go",
+      change: "added",
+      note: "Stage 1 — t.TempDir() fixture tables for matching, skipping, caps, and error cases.",
+    },
+    {
+      path: "main.go",
+      change: "modified",
+      note: "Stage 2 only — two entries appended to the tools slice. Nothing else.",
+    },
+  ]}
+/>
+
+The planned shape of each new tool file (a sketch of the decided mechanics, not final code):
+
+<TabsBlock
+  id="planned-shapes"
+  orientation="vertical"
+  tabs={[
+    {
+      id: "planned-run-command",
+      label: "run_command.go",
+      blocks: [
+        {
+          id: "planned-run-command-code",
+          type: "annotated-code",
+          data: {
+            filename: "run_command.go",
+            language: "go",
+            code: "// Package-level seams — tests substitute these.\nvar (\n  confirmIn       io.Reader = os.Stdin\n  confirmOut      io.Writer = os.Stdout\n  commandTimeout            = 30 * time.Second\n  stdinIsTerminal           = func() bool {\n    fi, err := os.Stdin.Stat()\n    return err == nil && fi.Mode()&os.ModeCharDevice != 0\n  }\n)\n\nconst maxCommandOutput = 10240\n\nfunc RunCommand(input json.RawMessage) (string, error) {\n  // 1. unmarshal — error, never panic (INV-8)\n  // 2. !stdinIsTerminal() -> \"non-interactive\" error before any prompt (INV-9)\n  // 3. print verbatim command + \"Allow? [y/N]:\" to confirmOut (AC-8)\n  // 4. read ONE line from confirmIn, one byte at a time — no bufio (INV-3)\n  // 5. y/yes (trimmed, any case) runs; anything else declines (INV-1, INV-2)\n  // 6. exec.CommandContext(ctx, \"sh\", \"-c\", cmd); cmd.WaitDelay = 2s (INV-5)\n  // 7. \"exit code: <n>\"; cap combined output at 10240 + \"[truncated]\" (INV-4)\n}",
+            annotations: [
+              {
+                lines: "2-10",
+                label: "Test seams",
+                note: "Vars, not config: tests swap them with strings.Reader / bytes.Buffer / stubs and restore via t.Cleanup.",
+              },
+              {
+                lines: "18",
+                label: "No bufio",
+                note: "A second buffered stdin reader could read up to 64KB ahead and silently swallow the user's next chat message.",
+              },
+              {
+                lines: "20",
+                label: "Timeout ceiling",
+                note: "WaitDelay force-closes pipes 2s after the kill; orphaned grandchildren of compound commands are an accepted ceiling (process-group kill is the upgrade path).",
+              },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      id: "planned-search-files",
+      label: "search_files.go",
+      blocks: [
+        {
+          id: "planned-search-files-code",
+          type: "annotated-code",
+          data: {
+            filename: "search_files.go",
+            language: "go",
+            code: "const (\n  maxMatches   = 100\n  maxMatchLine = 250\n)\n\nfunc SearchFiles(input json.RawMessage) (string, error) {\n  // 1. unmarshal — error, never panic (INV-8)\n  // 2. regexp.Compile(pattern); error carries the compile message (AC-12)\n  // 3. root = path or \".\"; nonexistent/unreadable root is an error\n  // 4. filepath.WalkDir: skip .git entirely; skip unreadable entries silently\n  // 5. os.ReadFile whole file, split on newline — no 64KB scanner limit\n  // 6. NUL byte in first 8KB marks binary; skip the file (INV-6)\n  // 7. emit \"path:line: text\" — relative path, 1-based line, 250-byte line cap\n  // 8. at 100 matches: fs.SkipAll + \"[truncated: first 100 matches shown]\" (INV-7)\n  // 9. zero matches: return \"no matches\" (AC-9)\n}",
+            annotations: [
+              {
+                lines: "11-12",
+                label: "Binary + long lines",
+                note: "Whole-file read sidesteps bufio.Scanner's 64KB token limit; the NUL heuristic is crude but wrong only in ways that cost a missed match, never a crash.",
+              },
+              {
+                lines: "14",
+                label: "Early stop",
+                note: "fs.SkipAll ends the walk at the cap, so a huge tree is never fully scanned once 100 matches exist.",
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ]}
+/>
+
+## Traceability — every INV and AC to its proof
+
+All IDs are defined in `docs/design/run-search-tools/design.md` Sections 4 and 8; their meanings are unchanged here.
+
+<Table
+  id="traceability"
+  density="compact"
+  columns={["ID", "Guarantees", "Proven by", "Task"]}
+  rows={[
+    ["INV-1", "Only y/yes (trimmed, any case) approves; all else declines", "gate table, run_command_test.go", "S1 run_command"],
+    ["INV-2", "Declined: 'user declined' error, process never started", "sentinel file, run_command_test.go", "S1 run_command"],
+    ["INV-3", "Gate consumes at most one stdin line", "leftover-bytes read (AC-3 case)", "S1 run_command"],
+    ["INV-4", "Exit code always stated; output cut at 10240 + [truncated]", "cap + exit cases", "S1 run_command"],
+    ["INV-5", "Running command killed at timeout; tool returns promptly", "100ms-timeout case with elapsed assert", "S1 run_command"],
+    ["INV-6", "Never descends .git; never returns NUL-binary lines", "fixture table, search_files_test.go", "S1 search_files"],
+    ["INV-7", "At most 100 matches + truncation note; walk stops", "150-match fixture", "S1 search_files"],
+    ["INV-8", "No panic on model-chosen input; errors returned instead", "error cases in both test files", "both S1 tasks"],
+    ["INV-9", "Non-TTY stdin: 'non-interactive' error before prompting", "stubbed stdinIsTerminal case", "S1 run_command"],
+    ["AC-1", "y approves echo hi: exit code 0 + output", "run_command_test.go", "S1 run_command"],
+    ["AC-2", "n / EOF / empty / garbage decline; sentinel absent", "run_command_test.go", "S1 run_command"],
+    ["AC-3", "Second stdin line still unread after approval", "run_command_test.go", "S1 run_command"],
+    ["AC-4", "~20KB output capped at 10240 + [truncated]", "run_command_test.go", "S1 run_command"],
+    ["AC-5", "exit 3 is a non-error result: 'exit code: 3'", "run_command_test.go", "S1 run_command"],
+    ["AC-6", "sleep 5 at 100ms timeout returns under 3s, says timed out", "run_command_test.go", "S1 run_command"],
+    ["AC-7", "stdout + stderr combined in one result", "run_command_test.go", "S1 run_command"],
+    ["AC-8", "Prompt contains the full verbatim command", "run_command_test.go", "S1 run_command"],
+    ["AC-9", "path:line: text, relative path, 1-based; else 'no matches'", "search_files_test.go", "S1 search_files"],
+    ["AC-10", "Matches in .git/ and NUL files absent", "search_files_test.go", "S1 search_files"],
+    ["AC-11", ">100 matching lines: exactly 100 + truncation note", "search_files_test.go", "S1 search_files"],
+    ["AC-12", "Invalid pattern / bad root: error, never panic", "search_files_test.go", "S1 search_files"],
+    ["AC-13", "path restricts to subtree; omitted searches '.'", "search_files_test.go", "S1 search_files"],
+    ["AC-14", "tools slice has 5 entries; smoke run exits cleanly", "go run . < /dev/null + build gate", "S2 registration"],
+    ["AC-15", "Non-TTY: error, nothing printed/read, no process", "run_command_test.go", "S1 run_command"],
+  ]}
+/>
+
+## Verification
+
+Every task runs the repo's standard gate before its commit; verbatim output is the evidence.
+
+```sh
+gofmt -l .              # must print nothing
+go build ./...
+go vet ./...
+go test ./...
+```
+
+The final gate (testing stage, after stage 2) adds:
+
+```sh
+go test -race ./...
+go run . < /dev/null    # prints the banner, exits 0 — live fail-closed smoke
+```
+
+The run_command tests execute real `sh` — that is the unit under test; dev and CI are darwin/linux (Windows is out of scope).
+
+<Callout id="accepted-ceilings" tone="risk">
+
+Accepted ceilings, decided in the design and not to be "fixed" during implementation: an answer typed **before** the prompt appears strands in the chat scanner's buffer (the visible prompt blocks until re-answered — recoverable, no data loss); background grandchildren of a timed-out compound command may survive as orphans (`WaitDelay` guarantees the tool returns; process-group kill is the recorded upgrade path); scripted piped-stdin sessions can never approve a command — that is the point of the human gate.
+
+</Callout>
