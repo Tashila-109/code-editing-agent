@@ -44,7 +44,7 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 10. **Approval gate 2** — present the plan + visual plan URL and STOP for an explicit go.
 11. **Implement, stage by stage** — for each stage in order: dispatch one `pi` coder per task (max 2 live), each prompt scoped to exactly its task and file set. A stage marked `Parallel: no` runs its tasks sequentially. Pipeline, don't batch: the moment a task lands, dispatch its codex review (task scope = `git diff HEAD -- <task file set>`) while the sibling keeps coding. Findings → same coder → re-review.
 12. **Stage testing** — when every task in the stage is reviewed clean and no coder is mid-edit (quiet tree), dispatch `pi-test` on the testing contract, stage mode. Failures → coder (verbatim output in the prompt) → re-review → re-test.
-13. **Commit** — after zero Must/Should-fix and a green stage test: you commit each task's file set separately, serialized, ending the message with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Delegates never commit, stage, or push. New edits after a review → re-review the delta before committing.
+13. **Commit** — after zero Must/Should-fix and a green stage test: you commit each task's file set separately, serialized, ending the message with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`. Delegates never commit, stage, or push. New implementer edits after a review → re-review the delta before committing; tests the tester added under its own contract ride on its green report and need no re-review.
 14. **Final branch review** — after the last stage's commits: codex, review contract, branch scope (`git diff $(git merge-base HEAD origin/main)...HEAD` plus anything uncommitted), including the `## Work summary` section. Findings → fix loop (steps 11–13).
 15. **Final test gate** — Claude subagent, model `opus`, testing contract in final mode. Always runs; never skipped on multi-stage work.
 16. **Push + PR** — `git push -u origin <branch>`; `gh pr create` — title from the design's executive summary, body = the work summary + test evidence, ending with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
@@ -59,7 +59,8 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 
 ## Herdr mechanics
 
-- Two-column layout: column 1 = this session; column 2 = delegated CLI panes stacked downward. First pane: `herdr pane split --current --direction right --cwd "$PWD" --no-focus`; every later pane splits the newest column-2 pane `--direction down`. Pane id from `.result.pane.pane_id` — parse JSON, never guess ids. Rename each pane to its role; close a pane only when its engagement is fully done; an errored or `blocked` pane stays open for inspection — tell the user.
+- Two-column layout: column 1 = this session; column 2 = delegated CLI panes stacked downward. First pane: `herdr pane split --current --direction right --cwd "$PWD" --no-focus`; every later pane splits the newest column-2 pane `--direction down`. Pane id from `.result.pane.pane_id` — parse JSON, never guess ids. Rename each pane to its role.
+- Pane hygiene — close each delegate's pane the moment its engagement is fully done, before the next stage starts: designer + design-review panes once the design is approved; the planner pane right after the plan gate (its visual-plan serve process dies with it, so never close it before the user has seen the URL); coder panes after their task commits; review/test panes once their verdict is consumed. An errored or `blocked` pane stays open for inspection — tell the user.
 - Start + prompt:
 
 ```bash
