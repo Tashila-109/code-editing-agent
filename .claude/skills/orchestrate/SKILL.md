@@ -32,12 +32,12 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 
 ## Lifecycle
 
-1. **Intake** — restate the ask. Trivial single-file fix → no orchestration; say so and do it. Otherwise run the `grilling` skill with the user in rounds; the settled decision tree becomes the design brief.
+1. **Intake** — restate the ask. Trivial single-file fix → no orchestration; say so and do it. Otherwise run the `grilling` skill with the user in rounds; the settled decision tree becomes the design brief. Settle approval-gate preferences in the grill: the plan gate (step 10) is on by default; the design gate (step 6) is OFF unless the user explicitly asks for one.
 2. **Memory bootstrap** — read `.claude/never-again.md` and the recent `.claude/checkpoint.md` entries; pass the relevant excerpts into every dispatch prompt.
 3. **Branch** — require a clean tree; on `main`, `git pull`, then `git checkout -b <type>/<slug>` (`feat|fix|chore`, short kebab slug). Nothing downstream runs on `main`. `<slug>` names the doc dirs below.
 4. **Design** — dispatch the designer (`claude`, Fable 5): project `design` skill with the brief → `docs/design/<slug>/design.md`. Blocking questions come back to you; put them to the user, redispatch with the answers.
 5. **Design review** — dispatch codex on the design-review contract, naming the design path and the code it makes claims about. Must/Should-fix findings → designer revision → re-review. Never skip re-review after fixes.
-6. **Approval gate** — present the design to the user and STOP. Thinking out loud is not approval; wait for an explicit go.
+6. **Design gate (opt-in)** — only when the user asked for it during grilling: present the design and STOP for an explicit go. Otherwise relay the approved design's executive summary in your status text and proceed straight to planning.
 7. **Plan** — dispatch the planner (`claude`): project `plan` skill, design path in the prompt → `docs/planning/<slug>/plan.md` with stages, tasks, and per-task file sets.
 8. **Plan review** — codex, review contract, plan scope. Findings → planner → re-review.
 9. **Visual plan** — same planner pane: user-scope `visual-plan` skill over the approved plan; relay the local bridge URL to the user.
