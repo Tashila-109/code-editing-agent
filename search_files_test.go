@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func TestSearchFiles(t *testing.T) {
@@ -14,7 +18,7 @@ func TestSearchFiles(t *testing.T) {
 		name  string
 		setup func(t *testing.T) SearchFilesInput
 		err   string
-		check func(t *testing.T, got string)
+		check func(t *testing.T, got string, in SearchFilesInput)
 	}{
 		{
 			name: "matching file returns path:line: text",
@@ -23,8 +27,8 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, "hello.txt", "aaa\nfoo bar\nbbb\n")
 				return SearchFilesInput{Pattern: "foo", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
-				want := "hello.txt:2: foo bar"
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				want := filepath.Join(in.Path, "hello.txt") + ":2: foo bar"
 				if got != want {
 					t.Fatalf("got %q, want %q", got, want)
 				}
@@ -37,7 +41,7 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, "hello.txt", "nothing here\n")
 				return SearchFilesInput{Pattern: "foo", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
 				if got != "no matches" {
 					t.Fatalf("got %q, want %q", got, "no matches")
 				}
@@ -50,8 +54,8 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, filepath.Join("nested", "dir", "file.txt"), "zzz\nfindme\n")
 				return SearchFilesInput{Pattern: "findme", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
-				want := filepath.Join("nested", "dir", "file.txt") + ":2: findme"
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				want := filepath.Join(in.Path, "nested", "dir", "file.txt") + ":2: findme"
 				if got != want {
 					t.Fatalf("got %q, want %q", got, want)
 				}
@@ -66,14 +70,15 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, "binary.bin", "alpha\x00still-alpha")
 				return SearchFilesInput{Pattern: "alpha", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
-				if got != "visible.txt:1: alpha" {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				want := filepath.Join(in.Path, "visible.txt") + ":1: alpha"
+				if got != want {
 					t.Fatalf("got %q, want only visible.txt match", got)
 				}
-				if strings.Contains(got, ".git") {
+				if strings.Contains(got, filepath.Join(in.Path, ".git")) {
 					t.Fatalf("result leaked .git match: %q", got)
 				}
-				if strings.Contains(got, "binary.bin") {
+				if strings.Contains(got, filepath.Join(in.Path, "binary.bin")) {
 					t.Fatalf("result leaked binary match: %q", got)
 				}
 			},
@@ -89,7 +94,7 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, "many.txt", b.String())
 				return SearchFilesInput{Pattern: "hit", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
 				lines := strings.Split(got, "\n")
 				if len(lines) != 101 {
 					t.Fatalf("got %d lines, want 101 (100 matches + note)", len(lines))
@@ -97,11 +102,33 @@ func TestSearchFiles(t *testing.T) {
 				if lines[len(lines)-1] != "[truncated: first 100 matches shown]" {
 					t.Fatalf("missing truncation note, last line %q", lines[len(lines)-1])
 				}
+				prefix := filepath.Join(in.Path, "many.txt")
 				for i := 0; i < 100; i++ {
-					want := "many.txt:" + strconv.Itoa(i+1) + ": hit"
+					want := prefix + ":" + strconv.Itoa(i+1) + ": hit"
 					if lines[i] != want {
 						t.Fatalf("line %d: got %q, want %q", i, lines[i], want)
 					}
+				}
+			},
+		},
+		{
+			name: "exactly 100 matches is not truncated",
+			setup: func(t *testing.T) SearchFilesInput {
+				dir := t.TempDir()
+				var b strings.Builder
+				for i := 0; i < 100; i++ {
+					b.WriteString("hit\n")
+				}
+				writeFile(t, dir, "exact.txt", b.String())
+				return SearchFilesInput{Pattern: "hit", Path: dir}
+			},
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				lines := strings.Split(got, "\n")
+				if len(lines) != 100 {
+					t.Fatalf("got %d lines, want 100", len(lines))
+				}
+				if lines[len(lines)-1] == "[truncated: first 100 matches shown]" {
+					t.Fatalf("exactly 100 should not truncate")
 				}
 			},
 		},
@@ -111,6 +138,13 @@ func TestSearchFiles(t *testing.T) {
 				return SearchFilesInput{Pattern: "[", Path: t.TempDir()}
 			},
 			err: "regexp",
+		},
+		{
+			name: "empty pattern is an error",
+			setup: func(t *testing.T) SearchFilesInput {
+				return SearchFilesInput{Pattern: "", Path: t.TempDir()}
+			},
+			err: "empty",
 		},
 		{
 			name: "nonexistent root",
@@ -127,12 +161,32 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, filepath.Join("b", "hit.txt"), "needle\n")
 				return SearchFilesInput{Pattern: "needle", Path: filepath.Join(dir, "a")}
 			},
-			check: func(t *testing.T, got string) {
-				if got != "hit.txt:1: needle" {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				want := filepath.Join(in.Path, "hit.txt") + ":1: needle"
+				if got != want {
 					t.Fatalf("got %q, want hit.txt only", got)
 				}
 				if strings.Contains(got, "b"+string(os.PathSeparator)) || strings.Contains(got, "b/hit") {
 					t.Fatalf("result leaked sibling tree: %q", got)
+				}
+			},
+		},
+		{
+			name: "does not follow symlink out of subtree",
+			setup: func(t *testing.T) SearchFilesInput {
+				dir := t.TempDir()
+				outside := t.TempDir()
+				writeFile(t, outside, "secret.txt", "needle\n")
+				writeFile(t, dir, "inside.txt", "needle\n")
+				if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "link.txt")); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return SearchFilesInput{Pattern: "needle", Path: dir}
+			},
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				want := filepath.Join(in.Path, "inside.txt") + ":1: needle"
+				if got != want {
+					t.Fatalf("got %q, want inside.txt only (symlink not followed): %q", got, want)
 				}
 			},
 		},
@@ -144,11 +198,12 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, "after8k.txt", strings.Repeat("x", 8192)+"\x00\nFINDME\n")
 				return SearchFilesInput{Pattern: "FINDME", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
 				if strings.Contains(got, "in8k.bin") {
 					t.Fatalf("NUL in first 8KB should skip: %q", got)
 				}
-				if !strings.Contains(got, "after8k.txt:2: FINDME") {
+				want := filepath.Join(in.Path, "after8k.txt") + ":2: FINDME"
+				if !strings.Contains(got, want) {
 					t.Fatalf("NUL after 8KB should still match: %q", got)
 				}
 			},
@@ -160,7 +215,7 @@ func TestSearchFiles(t *testing.T) {
 				writeFile(t, dir, "long.txt", strings.Repeat("a", 300)+"\n")
 				return SearchFilesInput{Pattern: "aaa", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
 				_, text, ok := strings.Cut(got, ":1: ")
 				if !ok {
 					t.Fatalf("got %q", got)
@@ -170,6 +225,41 @@ func TestSearchFiles(t *testing.T) {
 				}
 				if len(strings.TrimSuffix(text, "…")) != 250 {
 					t.Fatalf("capped text len %d, want 250", len(strings.TrimSuffix(text, "…")))
+				}
+			},
+		},
+		{
+			name: "line cap backs off to UTF-8 rune boundary",
+			setup: func(t *testing.T) SearchFilesInput {
+				dir := t.TempDir()
+				line := strings.Repeat("a", 248) + "€" + strings.Repeat("b", 20)
+				writeFile(t, dir, "utf8.txt", line+"\n")
+				return SearchFilesInput{Pattern: "aaa", Path: dir}
+			},
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				_, text, ok := strings.Cut(got, ":1: ")
+				if !ok {
+					t.Fatalf("got %q", got)
+				}
+				capped := strings.TrimSuffix(text, "…")
+				if !utf8.ValidString(capped) {
+					t.Fatalf("split a rune: %q", capped)
+				}
+				if capped != strings.Repeat("a", 248) {
+					t.Fatalf("got capped %q (len %d), want 248 ASCII bytes", capped, len(capped))
+				}
+			},
+		},
+		{
+			name: "newline-terminated file has no phantom empty line",
+			setup: func(t *testing.T) SearchFilesInput {
+				dir := t.TempDir()
+				writeFile(t, dir, "nl.txt", "foo\n")
+				return SearchFilesInput{Pattern: "^$", Path: dir}
+			},
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				if got != "no matches" {
+					t.Fatalf("got %q, want no matches (no phantom empty line past EOF)", got)
 				}
 			},
 		},
@@ -197,8 +287,9 @@ func TestSearchFiles(t *testing.T) {
 				}
 				return SearchFilesInput{Pattern: "needle", Path: dir}
 			},
-			check: func(t *testing.T, got string) {
-				if got != "ok.txt:1: needle" {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
+				want := filepath.Join(in.Path, "ok.txt") + ":1: needle"
+				if got != want {
 					t.Fatalf("got %q, want only ok.txt", got)
 				}
 			},
@@ -211,7 +302,7 @@ func TestSearchFiles(t *testing.T) {
 				t.Chdir(dir)
 				return SearchFilesInput{Pattern: "cwdmatch"}
 			},
-			check: func(t *testing.T, got string) {
+			check: func(t *testing.T, got string, in SearchFilesInput) {
 				if got != "here.txt:1: cwdmatch" {
 					t.Fatalf("got %q, want here.txt match from .", got)
 				}
@@ -235,8 +326,46 @@ func TestSearchFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			tt.check(t, got)
+			tt.check(t, got, in)
 		})
+	}
+}
+
+func TestSearchFilesSkipsFIFO(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("named pipes not supported")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.txt", "needle\n")
+	fifo := filepath.Join(dir, "block.fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+
+	in := SearchFilesInput{Pattern: "needle", Path: dir}
+	type outcome struct {
+		got string
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		got, err := SearchFiles(mustJSON(t, in))
+		done <- outcome{got, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("unexpected error: %v", r.err)
+		}
+		want := filepath.Join(dir, "ok.txt") + ":1: needle"
+		if r.got != want {
+			t.Fatalf("got %q, want %q", r.got, want)
+		}
+		if strings.Contains(r.got, "block.fifo") {
+			t.Fatalf("FIFO should be skipped: %q", r.got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("search hung on FIFO")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -35,6 +36,9 @@ func SearchFiles(input json.RawMessage) (string, error) {
 	if err := json.Unmarshal(input, &in); err != nil {
 		return "", err
 	}
+	if in.Pattern == "" {
+		return "", fmt.Errorf("empty pattern")
+	}
 
 	re, err := regexp.Compile(in.Pattern)
 	if err != nil {
@@ -60,6 +64,9 @@ func SearchFiles(input json.RawMessage) (string, error) {
 			}
 			return nil
 		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
 
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -73,21 +80,25 @@ func SearchFiles(input json.RawMessage) (string, error) {
 			return nil
 		}
 
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			rel = p
+		lines := strings.Split(string(data), "\n")
+		if n := len(lines); n > 0 && lines[n-1] == "" {
+			lines = lines[:n-1]
 		}
 
-		for i, line := range strings.Split(string(data), "\n") {
+		for i, line := range lines {
 			if !re.MatchString(line) {
 				continue
 			}
 			text := line
 			if len(text) > maxMatchLine {
-				text = text[:maxMatchLine] + "…"
+				cut := maxMatchLine
+				for cut > 0 && !utf8.RuneStart(text[cut]) {
+					cut--
+				}
+				text = text[:cut] + "…"
 			}
-			matches = append(matches, fmt.Sprintf("%s:%d: %s", rel, i+1, text))
-			if len(matches) >= maxMatches {
+			matches = append(matches, fmt.Sprintf("%s:%d: %s", p, i+1, text))
+			if len(matches) > maxMatches {
 				return fs.SkipAll
 			}
 		}
@@ -99,9 +110,10 @@ func SearchFiles(input json.RawMessage) (string, error) {
 	if len(matches) == 0 {
 		return "no matches", nil
 	}
-	out := strings.Join(matches, "\n")
-	if len(matches) >= maxMatches {
-		out += "\n[truncated: first 100 matches shown]"
+	note := ""
+	if len(matches) > maxMatches {
+		matches = matches[:maxMatches]
+		note = "\n[truncated: first 100 matches shown]"
 	}
-	return out, nil
+	return strings.Join(matches, "\n") + note, nil
 }
