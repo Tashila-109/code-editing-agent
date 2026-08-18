@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func swapSeams(t *testing.T, in io.Reader, terminal bool) *bytes.Buffer {
@@ -193,7 +195,7 @@ func TestRunCommandTimeout(t *testing.T) {
 	if elapsed >= 3*time.Second {
 		t.Fatalf("took %s, want < 3s", elapsed)
 	}
-	if !strings.Contains(got, "timed out") {
+	if !strings.Contains(got, "timed out after 100ms") {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -206,6 +208,55 @@ func TestRunCommandCombinedOutput(t *testing.T) {
 	}
 	if !strings.Contains(got, "out") || !strings.Contains(got, "err") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestRunCommandPromptEscapesControlBytes(t *testing.T) {
+	out := swapSeams(t, strings.NewReader("n\n"), true)
+	cmd := "echo hi\x1b[2J\nevil"
+	_, err := callRunCommand(t, cmd)
+	if err == nil {
+		t.Fatal("expected decline")
+	}
+	got := out.String()
+	quoted := fmt.Sprintf("%q", cmd)
+	if !strings.Contains(got, quoted) {
+		t.Fatalf("prompt missing quoted command %s: %q", quoted, got)
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("prompt contains raw ESC: %q", got)
+	}
+}
+
+func TestRunCommandWaitDelayKeepsOutput(t *testing.T) {
+	swapSeams(t, strings.NewReader("y\n"), true)
+	got, err := callRunCommand(t, "echo OUT; sleep 30 &")
+	if err != nil {
+		t.Fatalf("WaitDelay must be a result, err = %v", err)
+	}
+	if !strings.Contains(got, "OUT") {
+		t.Fatalf("discarded output: %q", got)
+	}
+	if !strings.Contains(got, "background process") {
+		t.Fatalf("missing wait-delay note: %q", got)
+	}
+}
+
+func TestFormatRunResultUTF8Boundary(t *testing.T) {
+	output := bytes.Repeat([]byte("a"), maxCommandOutput+2)
+	copy(output[maxCommandOutput-1:], []byte("€")) // e2 82 ac straddles the 10240-byte cut
+	got := formatRunResult(0, "", output)
+	_, rest, ok := strings.Cut(got, "\n")
+	if !ok {
+		t.Fatal("no newline")
+	}
+	body, _, found := strings.Cut(rest, "[truncated]")
+	if !found {
+		t.Fatal("missing [truncated]")
+	}
+	body = strings.TrimSuffix(body, "\n")
+	if !utf8.ValidString(body) {
+		t.Fatalf("invalid utf-8 after cap, last bytes %q", body[max(0, len(body)-8):])
 	}
 }
 

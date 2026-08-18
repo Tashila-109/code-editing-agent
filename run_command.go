@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const maxCommandOutput = 10240
@@ -58,7 +59,11 @@ func confirmRun(command string) error {
 	if !stdinIsTerminal() {
 		return errNonInteractive
 	}
-	fmt.Fprintf(confirmOut, "run_command wants to execute:\n  %s\nAllow? [y/N]: ", command)
+	shown := command
+	if commandHasUnsafeDisplayBytes(command) {
+		shown = fmt.Sprintf("%q", command)
+	}
+	fmt.Fprintf(confirmOut, "run_command wants to execute:\n  %s\nAllow? [y/N]: ", shown)
 	line, err := readOneLine(confirmIn)
 	if err != nil && err != io.EOF {
 		return errDeclined
@@ -69,6 +74,20 @@ func confirmRun(command string) error {
 	default:
 		return errDeclined
 	}
+}
+
+func commandHasUnsafeDisplayBytes(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x20 && c != 0x7f {
+			continue
+		}
+		if c == '\n' && i == len(s)-1 {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func readOneLine(r io.Reader) (string, error) {
@@ -98,24 +117,31 @@ func runApproved(command string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	timedOut := ctx.Err() == context.DeadlineExceeded
+	note := ""
 	exitCode := 0
-	if timedOut {
+	switch {
+	case timedOut:
 		exitCode = -1
-	} else if err != nil {
+		note = fmt.Sprintf("killed: timed out after %s", commandTimeout)
+	case errors.Is(err, exec.ErrWaitDelay):
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		note = "background process still holds the pipes"
+	case err != nil:
 		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			exitCode = ee.ExitCode()
-		} else {
+		if !errors.As(err, &ee) {
 			return "", err
 		}
+		exitCode = ee.ExitCode()
 	}
-	return formatRunResult(exitCode, timedOut, output), nil
+	return formatRunResult(exitCode, note, output), nil
 }
 
-func formatRunResult(exitCode int, timedOut bool, output []byte) string {
+func formatRunResult(exitCode int, note string, output []byte) string {
 	var b strings.Builder
-	if timedOut {
-		b.WriteString("exit code: -1 (killed: timed out after 30s)\n")
+	if note != "" {
+		fmt.Fprintf(&b, "exit code: %d (%s)\n", exitCode, note)
 	} else {
 		fmt.Fprintf(&b, "exit code: %d\n", exitCode)
 	}
@@ -126,10 +152,17 @@ func formatRunResult(exitCode int, timedOut bool, output []byte) string {
 	truncated := len(output) > maxCommandOutput
 	if truncated {
 		output = output[:maxCommandOutput]
+		for len(output) > 0 {
+			r, size := utf8.DecodeLastRune(output)
+			if r != utf8.RuneError || size != 1 {
+				break
+			}
+			output = output[:len(output)-1]
+		}
 	}
 	b.Write(output)
 	if truncated {
-		if output[len(output)-1] != '\n' {
+		if len(output) == 0 || output[len(output)-1] != '\n' {
 			b.WriteByte('\n')
 		}
 		b.WriteString("[truncated]")
