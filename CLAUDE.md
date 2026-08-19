@@ -18,7 +18,7 @@ Running requires `ANTHROPIC_API_KEY` in the environment (picked up automatically
 
 ## Agentic Workflow
 
-This repo doubles as the lab for the orchestrated multi-CLI workflow. The full protocol — routing matrix, model rule (Fable 5/high orchestrator, Sonnet 5 spawned Claude agents, Opus 5 for the final test gate + adversarial final review only), 3-column Herdr layout, a persistent pane monitor, retry→fallback, commit gating, and a focused Hunk-review tab as the final human gate — lives in the `orchestrate` skill; invoke it for any multi-file task. Bugbot is opt-in only. Invariants that hold even outside orchestration:
+This repo doubles as the lab for the orchestrated multi-CLI workflow. The full protocol — routing matrix, model rule (Fable 5/high orchestrator, Opus 5 designer/planner + final test gate + adversarial final review, Sonnet 5 for other spawned Claude agents), 3-column Herdr layout, a persistent pane monitor, retry→fallback, commit gating, and a focused Hunk-review tab as the final human gate — lives in the `orchestrate` skill; invoke it for any multi-file task. Bugbot is opt-in only. Invariants that hold even outside orchestration:
 
 - Never work on `main` — branch `feat|fix|chore/<slug>` first.
 - Only the orchestrator (main session) writes git state and `.claude/{checkpoint,never-again}.md`; read both before starting work.

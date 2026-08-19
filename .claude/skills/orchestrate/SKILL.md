@@ -16,16 +16,17 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 
 - **Orchestrator (this session)**: Fable 5, high effort.
 - **Final gate — tester and adversarial review**: `opus` (the only Opus agents; the final gate is the workflow's highest-value check).
-- **Every other Claude agent you spawn** (designer, planner, any Claude-subagent fallback): `sonnet`. Pi and codex agents bring their own models — the Sonnet rule applies only to agents whose model you set.
+- **Designer and planner**: `opus` (Opus 5).
+- **Every other Claude agent you spawn** (any Claude-subagent fallback): `sonnet`. Pi and codex agents bring their own models — these rules apply only to agents whose model you set.
 
 ## Routing matrix (authoritative)
 
 | Stage | Delegate | Model | Contract |
 | --- | --- | --- | --- |
 | Intake grilling | you + user (main session) | Fable 5 / high | user-scope `grilling` skill |
-| Design | `claude` CLI pane via Herdr | `sonnet` | `.claude/skills/design/SKILL.md` |
+| Design | `claude` CLI pane via Herdr | `opus` | `.claude/skills/design/SKILL.md` |
 | Design review | `codex` CLI pane | codex default | `.claude/skills/design-review/SKILL.md` |
-| Plan + visual plan | `claude` CLI pane | `sonnet` | `.claude/skills/plan/SKILL.md` |
+| Plan + visual plan | `claude` CLI pane | `opus` | `.claude/skills/plan/SKILL.md` |
 | Plan review | `codex` CLI pane | codex default | `.claude/skills/review/SKILL.md` (plan scope) |
 | Coding (per task) | `pi` CLI pane(s), max 2 live (`pi-1`, `pi-2`) | pi default | `.claude/skills/engineering/SKILL.md` |
 | Task review | `codex` CLI pane | codex default | `.claude/skills/review/SKILL.md` (task scope) |
@@ -40,7 +41,7 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 ## Retry → fallback (every delegated dispatch)
 
 1. A dispatch has failed when `herdr agent start` errors, the prompt returns `agent_prompt_stalled`, the agent errors out, or it ends `blocked` with nothing you can answer. First failure → retry once: fresh pane, same contract, prompt prefixed with one line naming what failed.
-2. Second failure → in-process Claude subagent via the Agent tool: prompt = "Read `<contract path>` and operate under it exactly." plus the same task specifics; model `sonnet` (final gate tester and final gate review are the Opus exceptions). Note every fallback in your status text and in the close-out checkpoint entry.
+2. Second failure → in-process Claude subagent via the Agent tool: prompt = "Read `<contract path>` and operate under it exactly." plus the same task specifics; model `sonnet` (designer, planner, final gate tester, and final gate review are the Opus exceptions). Note every fallback in your status text and in the close-out checkpoint entry.
 3. Not inside Herdr at all (`test "${HERDR_ENV:-}" = 1` fails) → run the whole matrix as Claude subagents (Sonnet, bar the Opus final gate). **No delegated CLI is ever load-bearing.**
 
 ## Lifecycle
@@ -49,10 +50,10 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 2. **Memory bootstrap** — read `.claude/never-again.md` and the recent `.claude/checkpoint.md` entries; pass the relevant excerpts into every dispatch prompt.
 3. **Branch** — require a clean tree; on `main`, `git pull`, then `git checkout -b <type>/<slug>` (`feat|fix|chore`, short kebab slug). Nothing downstream runs on `main`. `<slug>` names the doc dirs below.
    Then **arm the pane monitor** (once per run, before the first dispatch): a persistent background `Monitor` polling the delegate panes so a `blocked` (permission prompt) or errored delegate notifies you instead of being discovered on a `wait`. See Herdr mechanics.
-4. **Design** — dispatch the designer (`claude`, `sonnet`, `--permission-mode auto`): project `design` skill with the brief → `docs/design/<slug>/design.md`. Blocking questions come back to you; put them to the user, redispatch with the answers.
+4. **Design** — dispatch the designer (`claude`, `opus`, `--permission-mode auto`): project `design` skill with the brief → `docs/design/<slug>/design.md`. Blocking questions come back to you; put them to the user, redispatch with the answers.
 5. **Design review** — dispatch codex on the design-review contract, naming the design path and the code it makes claims about. Must/Should-fix findings → designer revision → re-review. Never skip re-review after fixes.
 6. **Design gate (opt-in)** — only when the user asked for it during grilling: present the design and STOP for an explicit go. Otherwise relay the approved design's executive summary in your status text and proceed straight to planning.
-7. **Plan** — dispatch the planner (`claude`, `sonnet`, `--permission-mode auto`): project `plan` skill, design path in the prompt → `docs/planning/<slug>/plan.md` with stages, tasks, and per-task file sets.
+7. **Plan** — dispatch the planner (`claude`, `opus`, `--permission-mode auto`): project `plan` skill, design path in the prompt → `docs/planning/<slug>/plan.md` with stages, tasks, and per-task file sets.
 8. **Plan review** — codex, review contract, plan scope. Findings → planner → re-review.
 9. **Visual plan** — same planner pane: user-scope `visual-plan` skill over the approved plan; relay the local bridge URL to the user.
 10. **Approval gate 2** — present the plan + visual plan URL and STOP for an explicit go.
@@ -107,12 +108,12 @@ Each emitted line means a delegate needs you (usually a permission prompt) — i
 
 ```bash
 herdr agent start pi-1 --kind pi --pane <pane_id>
-herdr agent start designer --kind claude --pane <pane_id> -- --model sonnet --permission-mode auto
+herdr agent start designer --kind claude --pane <pane_id> -- --model opus --permission-mode auto
 herdr agent prompt pi-1 "<task + contract path + scope + report format>" --wait --timeout 600000
 herdr agent read pi-1 --source visible --lines 200
 ```
 
-- Spawned `claude` sessions (designer, planner) start with `--model sonnet --permission-mode auto`.
+- Spawned `claude` sessions (designer, planner) start with `--model opus --permission-mode auto`.
 - CLI panes have no session context: every prompt is self-contained — contract path, branch, doc paths, task/stage, memory excerpts, required report format.
 - TUI agents run on the alternate screen: read with `--source visible`; if the response outruns the viewport, ask the agent to write it to a temp markdown file and reply with the path.
 - `blocked` or `agent_prompt_stalled` → `herdr agent get` + `herdr agent read` before sending anything.
