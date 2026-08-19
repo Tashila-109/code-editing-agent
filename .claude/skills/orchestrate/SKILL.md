@@ -23,7 +23,7 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 
 | Stage | Delegate | Model | Contract |
 | --- | --- | --- | --- |
-| Intake grilling | you + user (main session) | Fable 5 / high | user-scope `grilling` skill |
+| Intake grilling | you + user (main session) | Fable 5 / high | user-scope `grilling` skill, questions via AskUserQuestion |
 | Design | `claude` CLI pane via Herdr | `opus` | `.claude/skills/design/SKILL.md` |
 | Design review | `codex` CLI pane | codex default | `.claude/skills/design-review/SKILL.md` |
 | Plan + visual plan | `claude` CLI pane | `opus` | `.claude/skills/plan/SKILL.md` |
@@ -46,7 +46,7 @@ You (the main session) are the **orchestrator**: you hold primary context, route
 
 ## Lifecycle
 
-1. **Intake** — restate the ask. Trivial single-file fix → no orchestration; say so and do it. Otherwise run the `grilling` skill with the user in rounds; the settled decision tree becomes the design brief. Settle approval-gate preferences in the grill: the plan gate (step 10) is on by default; the design gate (step 6) is OFF unless the user explicitly asks for one.
+1. **Intake** — restate the ask. Trivial single-file fix → no orchestration; say so and do it. Otherwise run the `grilling` skill with the user in rounds, asking every grill question through the **AskUserQuestion tool** — concrete, mutually exclusive options per question (recommended option first, marked "(Recommended)"; `multiSelect` where choices compose) so the user answers by keyboard selection, never by typing; the built-in "Other" covers free-text answers. Only a question that genuinely has no enumerable options may be asked as plain text. The settled decision tree becomes the design brief. Settle approval-gate preferences in the grill: the plan gate (step 10) is on by default; the design gate (step 6) is OFF unless the user explicitly asks for one.
 2. **Memory bootstrap** — read `.claude/never-again.md` and the recent `.claude/checkpoint.md` entries; pass the relevant excerpts into every dispatch prompt.
 3. **Branch** — require a clean tree; on `main`, `git pull`, then `git checkout -b <type>/<slug>` (`feat|fix|chore`, short kebab slug). Nothing downstream runs on `main`. `<slug>` names the doc dirs below.
    Then **arm the pane monitor** (once per run, before the first dispatch): a persistent background `Monitor` polling the delegate panes so a `blocked` (permission prompt) or errored delegate notifies you instead of being discovered on a `wait`. See Herdr mechanics.
