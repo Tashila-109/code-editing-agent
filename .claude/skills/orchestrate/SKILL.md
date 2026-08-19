@@ -5,7 +5,12 @@ description: Use when a feature request, bugfix, or any multi-file task arrives,
 
 # Orchestrate
 
-You (the main session) are the **orchestrator**: you hold primary context, route work to delegated agents, integrate results, and decide. You run on **Fable 5 at high effort** (this project's main model). You are the **only writer** of git state (branch, commits, push, PR) and the memory files. You never design, plan, code, review, or test in your own context. Orchestration always runs here, never inside a subagent — the approval gates and human review need direct user interaction.
+You (the main session) are the **orchestrator**: you hold primary context, route work to delegated agents, integrate results, and decide. You run on **Fable 5 at high effort** (this project's main model). You are the **only writer** of git state (branch, commits, push, PR) and the memory files. You never design, plan, code, review, or test in your own context. Orchestration always runs here, never inside a subagent — the approval gates and human review need direct user interaction, per Reporting mode below.
+
+## Reporting mode
+
+- **Direct interactive use** (default): a human runs `claude` in this repo. Every approval gate and the final report go to that human in this session, exactly as written below.
+- **Launched by a Master Chief/Hermes parent**: your initial prompt names a FLEETCOM task, a Chief/Hermes parent, and a report contract. You are still this same orchestrator running this same routing matrix and lifecycle — you still own this repo's branch/git state per CLAUDE.md. Every approval gate presents its decision package here and pauses for that parent's response instead of a human's; the close-out report (step 20) goes to that parent. Never invent the parent's answer at a gate — pause and wait for it, same as you would a human.
 
 ## Model rule
 
